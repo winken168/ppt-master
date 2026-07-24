@@ -1,35 +1,43 @@
 # Audio Narration & Video Export
 
-PPT Master can turn the speaker notes into per-slide narration via [`edge-tts`](https://github.com/rany2/edge-tts) (Microsoft Edge's online neural voices) by default, or via ElevenLabs, MiniMax, Qwen TTS, and CosyVoice when you need higher-quality cloud narration or a cloned voice. It can then embed the audio back into the PPTX and let PowerPoint export the deck as an MP4 video — with synced narration and slide transitions, no extra tools.
+[English](./audio-narration.md) | [Chinese](./zh/audio-narration.md)
+
+---
+
+PPT Master can turn the speaker notes into per-slide narration via [`edge-tts`](https://github.com/rany2/edge-tts) (Microsoft Edge's online neural voices) by default, or via ElevenLabs, MiniMax, Qwen TTS, and CosyVoice when you need higher-quality cloud narration or a cloned voice. The edge path also writes a page-local SRT from the same TTS stream. It can then embed the audio back into the PPTX for PowerPoint's native video export.
 
 ## What you get
 
 - One audio file per slide under `<project_path>/audio/`, named to match the SVG (`01_cover.mp3`, `02_market_landscape.mp3`, …).
+- With edge, one matching subtitle file per slide under `<project_path>/notes/subtitles/` (`01_cover.srt`, `02_market_landscape.srt`, …). Each file uses a page-local timeline with a `00:00:00,000` origin and edge's word-boundary timing.
+- With an SVG-to-SRT timing plan, a rebuilt `animations.json` whose click-free entrance animations wait for the relevant subtitle cue, plus a deck-wide `<project_path>/notes/subtitles/total.srt` aligned to the final PPTX timeline. After PowerPoint exports a video, the same command can calibrate the page starts against its audio track for frame-accurate sidecar subtitles.
 - Optional re-export: a new PPTX in `exports/` with each `m4a` / `mp3` / `wav` file embedded into the matching slide and slide auto-advance timings set to the audio length, so kiosk/auto-play and video export work without manual timing.
 - The original speaker notes are preserved.
 
 ## How it works
 
 1. **Speaker notes are written as pure spoken narration.** PPT Master's notes spec deliberately produces TTS-friendly prose — no bracketed stage markers, no `Key points:` / `Duration:` meta-lines — so what is read aloud is exactly what's on the page.
-2. **AI picks the voice for you.** When you ask for narration, the AI checks the deck's primary language (`zh-CN` / `en-US` / `ja-JP` / `ko-KR` / …), pulls the selected provider's voice catalog, and recommends 3–6 candidates with a one-line tone description for each (e.g. "稳重男声，适合财报"). It also recommends a speaking rate or provider defaults based on notes density.
+2. **AI picks the voice for you.** When you ask for narration, the AI checks the deck's primary language (`zh-CN` / `en-US` / `ja-JP` / `ko-KR` / …), pulls the selected provider's voice catalog, and recommends 3–6 candidates with a one-line tone description for each (e.g. "steady male voice for financial reporting"). It also recommends a speaking rate or provider defaults based on notes density.
 3. **One question, one answer.** You are asked once — voice, rate, and "embed audio back into PPTX (yes/no)" — all with a recommended default. Reply "ok" to accept everything, or just call out the part you want to change.
-4. **Generation runs.** The script writes page-level audio to `audio/`, then (if you kept embedding) re-exports the deck with audio attached. Long-audio import and automatic long-audio splitting are not supported.
+4. **Generation runs.** With edge, the script writes each page's MP3 and SRT from the same stream to `audio/` and `notes/subtitles/`; cloud providers currently write audio only. For Generate PPTX, the AI maps current SVG content groups to numbered SRT cues, rebuilds click-free animations, and re-exports the deck with audio attached. It then merges the local SRT files using timing values read from that final PPTX. If a PowerPoint-exported video is available, an optional final pass measures each page narration in the video audio and corrects only the page offsets. Long-audio import and automatic long-audio splitting are not supported.
 
-The full step-by-step is in [`workflows/generate-audio.md`](../skills/ppt-master/workflows/generate-audio.md).
+Subtitles remain external artifacts: PPT Master does not embed them into the PPTX or export MP4 directly. Use PowerPoint's native video export with the generated `total.srt`.
+
+The shared stage is documented in [`workflows/stages/generate-audio.md`](../skills/ppt-master/workflows/stages/generate-audio.md).
 
 ## Two embedding paths
 
 | Command | Purpose |
 |---|---|
-| `--recorded-narration audio` | Prepare PowerPoint's recorded timings and narrations. Requires complete per-slide audio and writes page auto-advance timings. Use this for narrated/video export. |
-| `--narration-audio-dir audio` | Lower-level audio embedding. Embeds matched files and allows partial coverage. Use this for testing or manual PowerPoint finishing. |
+| `--recorded-narration audio` | Prepare PowerPoint's recorded timings and narrations. Requires complete per-slide audio and writes page auto-advance timings. Use this for narrated/video export. The re-export is saved as `exports/<name>_<timestamp>_narrated.pptx`. |
+| `--narration-audio-dir audio` | Lower-level audio embedding. Embeds matched files and allows partial coverage. Use this for testing or manual PowerPoint finishing. Exports get the same `_narrated` name suffix. |
 
 ## Triggering it
 
 Just say so in chat after the deck has been exported:
 
 ```
-You: 给这个 PPT 生成音频
+You: Generate narration audio for this deck
 You: Generate narration for this deck and re-export with audio embedded.
 You: Add Japanese voice narration; pick a calm female voice.
 ```
@@ -52,7 +60,7 @@ If you want to skip the AI flow and call the script directly:
 # 1. Make sure speaker notes are split (post-processing Step 7.1):
 python3 skills/ppt-master/scripts/total_md_split.py <project_path>
 
-# 2A. Generate MP3s with edge-tts (default, no API key)
+# 2A. Generate MP3/SRT pairs with edge-tts (default, no API key)
 python3 skills/ppt-master/scripts/notes_to_audio.py <project_path> \
   --voice zh-CN-YunjianNeural --rate +0%
 
@@ -86,12 +94,60 @@ python3 skills/ppt-master/scripts/notes_to_audio.py <project_path> \
   --voice-id <cosyvoice-voice> \
   --cosyvoice-model cosyvoice-v3-flash
 
-# 3. (Optional) Re-export PPTX with audio embedded
+# 3. Print the SRT-set fingerprint, then author
+#    <project_path>/narration_timing.json by comparing each current
+#    SVG content group with the numbered cues in that page's SRT. A missing
+#    cue means the group has no spoken counterpart and uses normal sequencing.
+python3 skills/ppt-master/scripts/narration_sync.py fingerprint <project_path>
+
+# 4. Rebuild click-free object animation timing from the formal SRT
+python3 skills/ppt-master/scripts/narration_sync.py animations <project_path> \
+  --narration-padding 0.5 --force
+
+# 5. Re-export PPTX with audio embedded
 python3 skills/ppt-master/scripts/svg_to_pptx.py <project_path> \
-  --recorded-narration audio
+  -o <final_narrated_pptx> --no-merge --recorded-narration audio \
+  --narration-padding 0.5
+
+# 6. Merge page-local SRT using the final PowerPoint timings
+python3 skills/ppt-master/scripts/narration_sync.py subtitles <project_path> \
+  --pptx <final_narrated_pptx> --force
+
+# 7. Optional after PowerPoint creates the video: calibrate page starts against
+#    the exported audio track and write a same-stem sidecar SRT
+python3 skills/ppt-master/scripts/narration_sync.py subtitles <project_path> \
+  --pptx <final_narrated_pptx> --video <powerpoint_exported_video> \
+  -o exports/<powerpoint_exported_video_stem>.srt --force
 ```
 
 For edge, `--voice` is required. Use `--list-voices --locale <locale>` to see what's available.
+Edge generates up to three slide-level audio/SRT pairs concurrently by default.
+Use `--concurrency <N>` to tune it or `--concurrency 1` for serial
+troubleshooting. Cloud providers remain serial.
+
+The edge command creates `audio/<stem>.mp3` and `notes/subtitles/<stem>.srt` from the same streaming request. Sentence-ending punctuation closes a cue. A cue over 20 visible characters first splits at commas, semicolons, or colons, then at the nearest word boundary only if it is still too long. Use `--subtitle-max-chars` to change the limit. Adjacent timing overlap up to 100 ms is tolerated by moving the later cue start to the previous cue end; larger overlap fails. Each SRT uses a page-local timebase with a zero origin and preserves edge's `WordBoundary` timing, including any leading silence before the first cue. The cloud-provider commands currently create audio only.
+
+`narration_timing.json` is deliberately separate from `animations.json`. It records the ordered SRT-set SHA-256, narration padding, ordered SVG group IDs, and optional 1-based cue numbers. `narration_sync.py animations` rejects a stale fingerprint, validates the group IDs against the current SVGs, and replaces the animation sidecar with only supported PowerPoint fields. `narration_sync.py subtitles` reads the final PPTX's actual presentation order plus millisecond slide-advance and transition values, so `total.srt` follows the native PPTX timeline. A relative `--pptx` path is resolved under `<project_path>`.
+
+PowerPoint's video encoder can quantize each slide/media segment to its output frame clock. Those small per-page differences may accumulate even when the PPTX timing values are correct. Passing the finished `.mp4` / `.wmv` / `.mov` with `--video` uses normalized audio correlation to locate each original page narration in the exported audio track. It changes only the page-level offsets: edge's cue text and page-local `WordBoundary` timing remain untouched. This is a post-export subtitle calibration step; PPT Master still does not create or rewrite the video.
+
+Use `--no-merge` for the final narrated SVG export. Keeping each SVG line in its own text frame preserves the authored coordinates; paragraph merging lets PowerPoint recalculate multiline text geometry and can introduce visible offsets.
+
+```json
+{
+  "version": 1,
+  "srt_sha256": "<sha256 of the ordered page-local SRT set>",
+  "narration_padding": 0.5,
+  "slides": {
+    "01_title": {
+      "groups": [
+        { "id": "page-title", "cue": 1 },
+        { "id": "supporting-visual" }
+      ]
+    }
+  }
+}
+```
 
 For ElevenLabs, `--voice-id` is required. List voices from your ElevenLabs account with:
 
@@ -102,6 +158,8 @@ python3 skills/ppt-master/scripts/notes_to_audio.py --provider elevenlabs --list
 
 For MiniMax, Qwen, and CosyVoice, pass the provider-specific system voice or cloned voice ID/name with `--voice-id`. Voice cloning itself is performed in the provider's console/API first; `notes_to_audio.py` uses the resulting voice ID to generate per-slide narration.
 
+Audio embedded into PPTX must use a PowerPoint-reliable format: `m4a` (AAC), `mp3`, or `wav`. Built-in generation defaults to `mp3`; transcode provider output such as `pcm`, `opus`, or `flac` before embedding.
+
 ## Use a cloned voice
 
 Four cloud providers — **ElevenLabs**, **MiniMax**, **Qwen**, **CosyVoice** — let you clone a voice from a short sample and then synthesize new speech in that voice. PPT Master narrates the entire deck in your cloned voice as long as you can hand it a `voice_id`. (`edge` does not support cloning.)
@@ -111,14 +169,14 @@ Four cloud providers — **ElevenLabs**, **MiniMax**, **Qwen**, **CosyVoice** �
 | Provider | Where to clone | Sample length |
 |---|---|---|
 | ElevenLabs | [elevenlabs.io](https://elevenlabs.io) → Voices → Add Voice → Instant / Professional Voice Cloning | 1 min (Instant) / 30 min+ (Professional) |
-| MiniMax | [platform.minimaxi.com](https://platform.minimaxi.com) → 语音克隆 (Voice Clone) | ~10 s – 5 min |
-| Qwen TTS | [DashScope console](https://dashscope.console.aliyun.com) → 语音合成 → 声音复刻 | ~10 s – 5 min |
-| CosyVoice | [DashScope console](https://dashscope.console.aliyun.com) → 语音合成 → 音色复刻 | ~10 s – 5 min |
+| MiniMax | [platform.minimaxi.com](https://platform.minimaxi.com) → Voice Clone | ~10 s – 5 min |
+| Qwen TTS | [DashScope console](https://dashscope.console.aliyun.com) → Speech Synthesis → Voice Replica | ~10 s – 5 min |
+| CosyVoice | [DashScope console](https://dashscope.console.aliyun.com) → Speech Synthesis → Voice Replica | ~10 s – 5 min |
 
 **How to use it after cloning** — in chat, just say so. The AI will skip the voice-recommendation step and use your `voice_id` directly:
 
 ```
-You: 用 MiniMax 我克隆的音色生成旁白，voice_id 是 xxxxxxx
+You: Generate narration with my cloned MiniMax voice; voice_id is xxxxxxx
 You: Generate the narration with my cloned ElevenLabs voice id abc123
 ```
 
@@ -136,7 +194,7 @@ Replace `--provider minimax` with `elevenlabs` / `qwen` / `cosyvoice` as needed;
 
 - **Authorization** — only clone voices you own or have explicit permission to use. Each provider's terms forbid impersonation.
 - **Language coverage** — the cloned voice inherits the speaker's accent. For multilingual decks (e.g. Chinese with English terms), pick a provider whose model handles your sample's language mix; ElevenLabs `eleven_multilingual_v2` and CosyVoice tend to be the most forgiving.
-- **One-time setup, reusable forever** — the `voice_id` doesn't expire. Clone once, narrate any number of decks.
+- **Provider retention** — reuse the `voice_id` while that voice remains available in your provider account. Retention, deletion, and expiration policies are provider-specific.
 
 ## Dependency
 
@@ -150,7 +208,7 @@ Cloud TTS providers do not require extra Python packages; they use HTTPS directl
 
 ## Tips
 
-- **Pacing**: PPT Master's default speaker-notes are 2–5 sentences per slide; `+0%` rate sounds natural. If a deck is very dense (long technical paragraphs), try `-5%`.
+- **Pacing**: On the Generate PPTX route, speaker notes scale with the independent information groups in the final SVG; 2–5 sentences is a typical rhythm, not a cap. Start with `+0%`; for a dense, deliberately detailed script, try `-5%`.
 - **Mid-deck regeneration**: change a single slide's `notes/<page>.md`, re-run `notes_to_audio.py` (it overwrites all MP3s, so re-run for the whole deck — the cost is small).
 - **Mixed-language decks** (Chinese with English technical terms etc.): `edge-tts` neural voices handle the embedded foreign words reasonably well in most locales — pick the dominant language voice and try one slide first.
 
@@ -164,12 +222,13 @@ Once the narrated PPTX is in `exports/`, PowerPoint exports it as a video native
 2. **File → Export → Create a Video**.
 3. Pick a quality (4K / Full HD / HD / Standard) and "Use Recorded Timings and Narrations" — PPT Master has already set both for you.
 4. **Create Video** → save as `.mp4` (or `.wmv` on Windows).
+5. For the closest external-subtitle sync, run the optional `narration_sync.py subtitles --video ...` command above and use its same-stem SRT beside the exported video.
 
 **Keynote (Mac)**: open the deck → **File → Export To → Movie…** — Keynote also honors embedded audio and per-slide timings, output `.m4v` / `.mov`.
 
 **Tips**:
 
 - **No mic, no recording session needed** — the audio is generated, not recorded, so re-runs are deterministic.
-- **Animations are preserved** — page transitions and click-free per-element entrance animations from PPT Master are real OOXML and play correctly in the exported video. See [Animations & Transitions](../skills/ppt-master/references/animations.md).
+- **Animations are preserved** — page transitions and click-free per-element entrance animations from PPT Master are real OOXML and play correctly in the exported video. See [Animations & Transitions](./animations.md).
 - **Want to tweak just one slide's audio?** Edit `notes/<page>.md`, re-run `notes_to_audio.py` and the embedding step, then re-export the video — total turnaround is usually under a minute per slide.
 - **File size**: a 20-page deck at Full HD typically lands at 30–80 MB depending on imagery. Drop to HD if you need a smaller file for sharing.
